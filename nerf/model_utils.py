@@ -15,7 +15,6 @@
 
 # Lint as: python3
 """Helper functions/classes for model definition."""
-
 import functools
 from typing import Any, Callable
 import math

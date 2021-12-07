@@ -15,21 +15,17 @@
 
 # Lint as: python3
 """Evaluation script for Nerf."""
-
 import os
-
 import functools
 from os import path
-
 from absl import app
 from absl import flags
-
 import torch
 import numpy as np
 
-from torchnerf.nerf import datasets
-from torchnerf.nerf import models
-from torchnerf.nerf import utils
+from nerf import datasets
+from nerf import models
+from nerf import utils
 
 FLAGS = flags.FLAGS
 
@@ -66,8 +62,8 @@ def main(unused_argv):
         step = int(state.step)
         if step <= last_step:
             continue
-        if FLAGS.save_output and (not utils.isdir(out_dir)):
-            utils.makedirs(out_dir)
+        if FLAGS.save_output and (not os.path.isdir(out_dir)):
+            os.makedirs(out_dir, exist_ok=True)
         psnrs = []
         ssims = []
         if not FLAGS.eval_once:
@@ -115,9 +111,9 @@ def main(unused_argv):
                 summary_writer.add_scalar("ssim", np.mean(np.array(ssims)), step)
                 summary_writer.add_image("target", showcase_gt, step)
         if FLAGS.save_output and (not FLAGS.render_path):
-            with utils.open_file(path.join(out_dir, "psnr.txt"), "w") as pout:
+            with open(path.join(out_dir, "psnr.txt"), "w") as pout:
                 pout.write("{}".format(np.mean(np.array(psnrs))))
-            with utils.open_file(path.join(out_dir, "ssim.txt"), "w") as pout:
+            with open(path.join(out_dir, "ssim.txt"), "w") as pout:
                 pout.write("{}".format(np.mean(np.array(ssims))))
         if FLAGS.eval_once:
             break

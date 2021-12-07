@@ -28,8 +28,6 @@ from PIL import Image
 import yaml
 from tqdm import tqdm
 
-BASE_DIR = "torchnerf"
-
 
 class TrainState:
     def __init__(
@@ -97,12 +95,10 @@ def define_flags():
         help="set for spherical 360 scenes.")
     parser.add_argument(
         "--render_path", type=bool, default=False,
-        help="render generated path if set true. (used in the llff dataset only)",
-    )
+        help="render generated path if set true. (used in the llff dataset only)")
     parser.add_argument(
         "--llffhold", type=int, default=8,
-        help="will take every 1/N images as LLFF test set. (used in the llff dataset only)",
-    )
+        help="will take every 1/N images as LLFF test set. (used in the llff dataset only)")
 
     # Model Flags
     parser.add_argument(
@@ -147,9 +143,6 @@ def define_flags():
     parser.add_argument(
         "--use_viewdirs", type=bool, default=True, help="use view directions as a condition.")
     parser.add_argument(
-        "--sh_order", type=int, default=-1,
-        help="set to use spherical harmonics output of given order.")
-    parser.add_argument(
         "--noise_std", type=float, default=None,
         help="std dev of noise added to regularize sigma output. (used in the llff dataset only)")
     parser.add_argument(
@@ -162,18 +155,19 @@ def define_flags():
         "--rgb_activation", type=str, default="Sigmoid",
         help="activation function used to produce RGB.")
     parser.add_argument(
-        "--sigma_activation", type=str, default="ReLU",
+        "--sigma_activation", type=str, default="Softplus",
         help="activation function used to produce density.")
     parser.add_argument(
         "--legacy_posenc_order", type=bool, default=False,
-        help="If True, revert the positional encoding feature order to an older version of this codebase.",
-    )
+        help="If True, revert the positional encoding feature order to an older version of this codebase.")
 
     # Train Flags
     parser.add_argument(
         "--lr_init", type=float, default=5e-4, help="The initial learning rate.")
     parser.add_argument(
         "--lr_final", type=float, default=5e-6, help="The final learning rate.")
+    parser.add_argument(
+        "--lr_max_steps", type=int, default=1000000, help="(for a fair comparison)")
     parser.add_argument(
         "--lr_delay_steps", type=int, default=0,
         help="The number of steps at the beginning of training to reduce the learning rate by lr_delay_mult")
@@ -193,8 +187,7 @@ def define_flags():
     # Eval Flags
     parser.add_argument(
         "--eval_once", type=bool, default=True,
-        help="evaluate the model only once if true, otherwise keeping evaluating new checkpoints if there's any.",
-    )
+        help="evaluate the model only once if true, otherwise keeping evaluating new checkpoints if there's any.")
     parser.add_argument(
         "--save_output", type=bool, default=True, help="save predicted images to disk if True.")
     parser.add_argument(
@@ -208,8 +201,8 @@ def update_flags(args):
     """Update the flags in `args` with the contents of the config YAML file."""
     if args.config is None:
         return
-    pth = os.path.join(BASE_DIR, args.config + ".yaml")
-    with open_file(pth, "r") as fin:
+    pth = os.path.join(args.config + ".yaml")
+    with open(pth, "r") as fin:
         configs = yaml.load(fin, Loader=yaml.FullLoader)
     # Only allow args to be updated if they already exist.
     invalid_args = list(set(configs.keys()) - set(dir(args)))
@@ -230,61 +223,6 @@ def check_flags(args, require_data=True, require_batch_size_div=False):
 def set_random_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
-
-
-def open_file(pth, mode="r"):
-    pth = os.path.expanduser(pth)
-    return open(pth, mode=mode)
-
-
-def file_exists(pth):
-    return os.path.exists(pth)
-
-
-def listdir(pth):
-    return os.listdir(pth)
-
-
-def isdir(pth):
-    return os.path.isdir(pth)
-
-
-def makedirs(pth):
-    os.makedirs(pth, exist_ok=True)
-
-
-@torch.no_grad()
-def eval_points(fn, points, chunk=720720, to_cpu=True):
-    """Evaluate at given points (in test mode).
-    Currently not supporting viewdirs.
-
-    Args:
-      fn: function
-      points: torch.tensor [..., 3]
-      chunk: int, the size of chunks to render sequentially.
-
-    Returns:
-      rgb: torch.tensor or np.array.
-      sigmas: torch.tensor or np.array.
-    """
-    num_points = points.shape[0]
-    rgbs, sigmas = [], []
-
-    for i in tqdm(range(0, num_points, chunk)):
-        chunk_points = points[i : i + chunk]
-        rgb, sigma = fn(chunk_points, None)
-        if to_cpu:
-            rgb = rgb.detach().cpu().numpy()
-            sigma = sigma.detach().cpu().numpy()
-        rgbs.append(rgb)
-        sigmas.append(sigma)
-    if to_cpu:
-        rgbs = np.concatenate(rgbs, axis=0)
-        sigmas = np.concatenate(sigmas, axis=0)
-    else:
-        rgbs = torch.cat(rgbs, dim=0)
-        sigmas = torch.cat(sigmas, dim=0)
-    return rgbs, sigmas
 
 
 def render_image(render_fn, rays, normalize_disp, chunk=8192):
@@ -323,7 +261,7 @@ def render_image(render_fn, rays, normalize_disp, chunk=8192):
     )
 
 
-def compute_psnr(mse):
+def compute_psnr(*args):
     """Compute psnr value given mse (we assume the maximum pixel value is 1).
 
     Args:
@@ -332,13 +270,18 @@ def compute_psnr(mse):
     Returns:
       psnr: float, the psnr value.
     """
+    if len(args) == 1:
+        mse = args[0]
+    else:
+        img0, img1 = args[0], args[1]
+        mse = (img0 - img1) ** 2
     return -10.0 * torch.log(mse) / np.log(10.0)
 
 
 def compute_ssim(
     img0,
     img1,
-    max_val,
+    max_val=1.0,
     filter_size=11,
     filter_sigma=1.5,
     k1=0.01,
@@ -422,14 +365,14 @@ def save_img(img, pth):
         before saved to pth.
       pth: string, path to save the image to.
     """
-    with open_file(pth, "wb") as imgout:
+    with open(pth, "wb") as imgout:
         Image.fromarray(
             np.array((np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8))
         ).save(imgout, "PNG")
 
 
 def learning_rate_decay(
-    step, lr_init, lr_final, max_steps, lr_delay_steps=0, lr_delay_mult=1
+    step, lr_init, lr_final, lr_max_steps, lr_delay_steps=0, lr_delay_mult=1
 ):
     """Continuous learning rate decay function.
 
@@ -458,174 +401,6 @@ def learning_rate_decay(
         )
     else:
         delay_rate = 1.0
-    t = np.clip(step / max_steps, 0, 1)
+    t = np.clip(step / lr_max_steps, 0, 1)
     log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
     return delay_rate * log_lerp
-
-
-def cmap(im):
-    im = torch.clamp(im, 0.0, 1.0)
-    r = im
-    g = torch.zeros_like(im)
-    b = 1.0 - im
-    return torch.cat((r, g, b), dim=-1)
-
-
-def generate_rays(w, h, focal, camtoworlds, equirect=False):
-    """
-    Generate perspective camera rays. Principal point is at center.
-    Args:
-        w: int image width
-        h: int image heigth
-        focal: float real focal length
-        camtoworlds: jnp.ndarray [B, 4, 4] c2w homogeneous poses
-        equirect: if true, generates spherical rays instead of pinhole
-    Returns:
-        rays: Rays a namedtuple(origins [B, 3], directions [B, 3], viewdirs [B, 3])
-    """
-    x, y = np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
-        np.arange(w, dtype=np.float32),  # X-Axis (columns)
-        np.arange(h, dtype=np.float32),  # Y-Axis (rows)
-        indexing="xy",
-    )
-
-    if equirect:
-        uv = np.stack([x * (2.0 / w) - 1.0, y * (2.0 / h) - 1.0], axis=-1)
-        camera_dirs = equirect2xyz(uv)
-    else:
-        camera_dirs = np.stack(
-            [
-                (x - w * 0.5) / focal,
-                -(y - h * 0.5) / focal,
-                -np.ones_like(x),
-            ],
-            axis=-1,
-        )
-
-    #  camera_dirs = camera_dirs / np.linalg.norm(camera_dirs, axis=-1, keepdims=True)
-
-    c2w = camtoworlds[:, None, None, :3, :3]
-    camera_dirs = camera_dirs[None, Ellipsis, None]
-    directions = np.matmul(c2w, camera_dirs)[Ellipsis, 0]
-    origins = np.broadcast_to(
-        camtoworlds[:, None, None, :3, -1], directions.shape
-    )
-    norms = np.linalg.norm(directions, axis=-1, keepdims=True)
-    viewdirs = directions / norms
-    rays = Rays(
-        origins=origins, directions=directions, viewdirs=viewdirs
-    )
-    return rays
-
-def equirect2xyz(uv):
-    """
-    Convert equirectangular coordinate to unit vector,
-    inverse of xyz2equirect
-    Args:
-        uv: torch.tensor [..., 2] x, y coordinates in image space in [-1.0, 1.0]
-    Returns:
-        xyz: torch.tensor [..., 3] unit vectors
-    """
-    lon = uv[..., 0] * math.pi
-    lat = uv[..., 1] * (math.pi * 0.5)
-    coslat = torch.cos(lat)
-    return torch.stack(
-            [
-                coslat * torch.sin(lon),
-                torch.sin(lat),
-                coslat * torch.cos(lon),
-            ],
-            dim=-1)
-
-def xyz2equirect(xyz):
-    """
-    Convert unit vector to equirectangular coordinate,
-    inverse of equirect2xyz
-    Args:
-        xyz: torch.tensor [..., 3] unit vectors
-    Returns:
-        uv: torch.tensor [...] coordinates (x, y) in image space in [-1.0, 1.0]
-    """
-    lat = torch.arcsin(torch.clamp(xyz[..., 1], -1.0, 1.0))
-    lon = torch.arctan2(xyz[..., 0], xyz[..., 2])
-    x = lon / math.pi
-    y = 2.0 * lat / math.pi
-    return torch.stack([x, y], dim=-1)
-
-
-def trans_t(t):
-    return np.array(
-        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, t], [0, 0, 0, 1],], dtype=np.float32,
-    )
-
-
-def rot_phi(phi):
-    return np.array(
-        [
-            [1, 0, 0, 0],
-            [0, np.cos(phi), -np.sin(phi), 0],
-            [0, np.sin(phi), np.cos(phi), 0],
-            [0, 0, 0, 1],
-        ],
-        dtype=np.float32,
-    )
-
-
-def rot_theta(th):
-    return np.array(
-        [
-            [np.cos(th), 0, -np.sin(th), 0],
-            [0, 1, 0, 0],
-            [np.sin(th), 0, np.cos(th), 0],
-            [0, 0, 0, 1],
-        ],
-        dtype=np.float32,
-    )
-
-def pose_spherical(theta, phi, radius):
-    """
-    Spherical rendering poses, from NeRF
-    """
-    c2w = trans_t(radius)
-    c2w = rot_phi(phi / 180.0 * np.pi) @ c2w
-    c2w = rot_theta(theta / 180.0 * np.pi) @ c2w
-    c2w = (
-        np.array(
-            [[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
-            dtype=np.float32,
-        )
-        @ c2w
-    )
-    return c2w
-
-
-def normalize(x):
-    return x / np.linalg.norm(x)
-
-
-def viewmatrix(z, up, pos):
-    vec2 = normalize(z)
-    vec1_avg = up
-    vec0 = normalize(np.cross(vec1_avg, vec2))
-    vec1 = normalize(np.cross(vec2, vec0))
-    m = np.stack([vec0, vec1, vec2, pos], 1)
-    return m
-
-
-def get_render_pfn(model, randomized):
-    def render_fn(rays):
-        return model(rays, randomized)
-    return render_fn
-
-
-def get_eval_points_pfn(model, raw_rgb, coarse=False):
-    eval_method = model.eval_points_raw if raw_rgb else model.eval_points
-    def eval_points_fn(points, viewdirs):
-        return eval_method(points, viewdirs, coarse=coarse)
-    return eval_points_fn
-
-
-if __name__ == "__main__":
-    args = define_flags()
-    update_flags(args)
-    print (args)

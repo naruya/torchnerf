@@ -15,16 +15,16 @@
 
 # Lint as: python3
 """Different model implementation plus a general port for all the models."""
-import os, glob
+import os
+import glob
 import inspect
 from typing import Any, Callable
 
 import torch
 import torch.nn as nn
 
-from torchnerf.nerf import model_utils
-from torchnerf.nerf import utils
-from torchnerf.nerf import sh
+from nerf import model_utils
+from nerf import utils
 
 
 def get_model(args):
@@ -73,7 +73,6 @@ class NerfModel(nn.Module):
         num_coarse_samples: int = 64,  # The number of samples for the coarse nerf.
         num_fine_samples: int = 128,  # The number of samples for the fine nerf.
         use_viewdirs: bool = True,  # If True, use viewdirs as an input.
-        sh_order: int = -1,  # If != -1, use spherical harmonics output of given order
         near: float = 2.0,  # The distance to the near plane
         far: float = 6.0,  # The distance to the far plane
         noise_std: float = 0.0,  # The std dev of noise added to raw sigma.
@@ -98,7 +97,6 @@ class NerfModel(nn.Module):
         self.num_coarse_samples = num_coarse_samples
         self.num_fine_samples = num_fine_samples
         self.use_viewdirs = use_viewdirs
-        self.sh_order = sh_order
         self.near = near
         self.far = far
         self.noise_std = noise_std
@@ -130,85 +128,21 @@ class NerfModel(nn.Module):
             skip_layer = self.skip_layer,
             num_rgb_channels = self.num_rgb_channels,
             num_sigma_channels = self.num_sigma_channels,
-            input_dim=63, 
-            condition_dim=27 if sh_order == -1 else 0)
+            input_dim=63,
+            condition_dim=27)
         # Construct the "fine" MLP.
-        self.MLP_1 = model_utils.MLP(
-            net_depth = self.net_depth,
-            net_width = self.net_width,
-            net_depth_condition = self.net_depth_condition,
-            net_width_condition = self.net_width_condition,
-            net_activation = self.net_activation,
-            skip_layer = self.skip_layer,
-            num_rgb_channels = self.num_rgb_channels,
-            num_sigma_channels = self.num_sigma_channels,
-            input_dim=63, 
-            condition_dim=27 if sh_order == -1 else 0)
-
-    def eval_points_raw(self, points, viewdirs=None, coarse=False):
-        """
-        Evaluate at points, returing rgb and sigma.
-        If sh_order >= 0 then this will return spherical harmonic
-        coeffs for RGB. Please see eval_points for alternate
-        version which always returns RGB.
-        Args:
-          points: torch.tensor [B, 3]
-          viewdirs: torch.tensor [B, 3]
-          coarse: if true, uses coarse MLP
-        Returns:
-          raw_rgb: torch.tensor [B, 3 * (sh_order + 1)**2 or 3]
-          raw_sigma: torch.tensor [B, 1]
-        """
-        points = points[None]
-        points_enc = model_utils.posenc(
-            points,
-            self.min_deg_point,
-            self.max_deg_point,
-            self.legacy_posenc_order,
-        )
-        if self.num_fine_samples > 0 and not coarse:
-            mlp = self.MLP_1
-        else:
-            mlp = self.MLP_0
-        if self.use_viewdirs:
-            assert viewdirs is not None
-            viewdirs = viewdirs[None]
-            viewdirs_enc = model_utils.posenc(
-                viewdirs,
-                0,
-                self.deg_view,
-                self.legacy_posenc_order,
-            )
-            raw_rgb, raw_sigma = mlp(points_enc, viewdirs_enc)
-        else:
-            raw_rgb, raw_sigma = mlp(points_enc)
-        return raw_rgb[0], raw_sigma[0]
-
-    def eval_points(self, points, viewdirs=None, coarse=False):
-        """
-        Evaluate at points, converting spherical harmonics rgb to
-        rgb via viewdirs if applicable. Exists since jax does not allow
-        size to depend on input.
-        Args:
-          points: torch.tensor [B, 3]
-          viewdirs: torch.tensor [B, 3]
-          coarse: if true, uses coarse MLP
-        Returns:
-          rgb: torch.tensor [B, 3]
-          sigma: torch.tensor [B, 1]
-        """
-        raw_rgb, raw_sigma = self.eval_points_raw(points, viewdirs, coarse)
-        if self.sh_order >= 0:
-            assert viewdirs is not None
-            # (256, 64, 48) (256, 3)
-            raw_rgb = sh.eval_sh(self.sh_order, raw_rgb.view(
-                *raw_rgb.shape[:-1],
-                -1,
-                (self.sh_order + 1) ** 2), viewdirs[:, None])
-
-        rgb = self.rgb_activation(raw_rgb)
-        sigma = self.sigma_activation(raw_sigma)
-        return rgb, sigma
+        if self.num_fine_samples > 0:
+            self.MLP_1 = model_utils.MLP(
+                net_depth = self.net_depth,
+                net_width = self.net_width,
+                net_depth_condition = self.net_depth_condition,
+                net_width_condition = self.net_width_condition,
+                net_activation = self.net_activation,
+                skip_layer = self.skip_layer,
+                num_rgb_channels = self.num_rgb_channels,
+                num_sigma_channels = self.num_sigma_channels,
+                input_dim=63,
+                condition_dim=27)
 
     def forward(self, rays, randomized):
         """Nerf Model.
@@ -255,13 +189,6 @@ class NerfModel(nn.Module):
             randomized,
         )
 
-        if self.sh_order >= 0:
-            # (256, 64, 48) (256, 3)
-            raw_rgb = sh.eval_sh(self.sh_order, raw_rgb.view(
-                *raw_rgb.shape[:-1],
-                -1,
-                (self.sh_order + 1) ** 2), rays.viewdirs[:, None])
-
         rgb = self.rgb_activation(raw_rgb)
         sigma = self.sigma_activation(raw_sigma)
 
@@ -304,11 +231,6 @@ class NerfModel(nn.Module):
                 self.noise_std,
                 randomized,
             )
-            if self.sh_order >= 0:
-                raw_rgb = sh.eval_sh(self.sh_order, raw_rgb.view(
-                    *raw_rgb.shape[:-1],
-                    -1,
-                    (self.sh_order + 1) ** 2), rays.viewdirs[:, None])
 
             rgb = self.rgb_activation(raw_rgb)
             sigma = self.sigma_activation(raw_sigma)
@@ -343,31 +265,6 @@ def construct_nerf(args):
     if inspect.isclass(sigma_activation):
         sigma_activation = sigma_activation()
 
-    # Assert that rgb_activation always produces outputs in [0, 1], and
-    # sigma_activation always produce non-negative outputs.
-    x = torch.exp(torch.linspace(-90, 90, 1024))
-    x = torch.cat([-x, x], dim=0)
-
-    rgb = rgb_activation(x)
-    if torch.any(rgb < 0) or torch.any(rgb > 1):
-        raise NotImplementedError(
-            "Choice of rgb_activation `{}` produces colors outside of [0, 1]".format(
-                args.rgb_activation
-            )
-        )
-
-    sigma = sigma_activation(x)
-    if torch.any(sigma < 0):
-        raise NotImplementedError(
-            "Choice of sigma_activation `{}` produces negative densities".format(
-                args.sigma_activation
-            )
-        )
-    num_rgb_channels = args.num_rgb_channels
-    if args.sh_order >= 0:
-        assert not args.use_viewdirs
-        num_rgb_channels *= (args.sh_order + 1) ** 2
-
     model = NerfModel(
         min_deg_point=args.min_deg_point,
         max_deg_point=args.max_deg_point,
@@ -375,7 +272,6 @@ def construct_nerf(args):
         num_coarse_samples=args.num_coarse_samples,
         num_fine_samples=args.num_fine_samples,
         use_viewdirs=args.use_viewdirs,
-        sh_order=args.sh_order,
         near=args.near,
         far=args.far,
         noise_std=args.noise_std,
@@ -385,7 +281,7 @@ def construct_nerf(args):
         net_depth_condition=args.net_depth_condition,
         net_width_condition=args.net_width_condition,
         skip_layer=args.skip_layer,
-        num_rgb_channels=num_rgb_channels,
+        num_rgb_channels=args.num_rgb_channels,
         num_sigma_channels=args.num_sigma_channels,
         lindisp=args.lindisp,
         net_activation=net_activation,

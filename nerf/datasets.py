@@ -15,7 +15,6 @@
 
 # Lint as: python3
 """Different datasets implementation plus a general port for all the datasets."""
-INTERNAL = False  # pylint: disable=g-statement-before-imports
 import json
 import os
 import threading
@@ -25,7 +24,7 @@ import cv2  # pylint: disable=g-import-not-at-top
 import numpy as np
 from PIL import Image
 
-from torchnerf.nerf import utils
+from nerf import utils
 
 
 def get_dataset(split, args):
@@ -167,7 +166,7 @@ class Dataset(threading.Thread):
     def _generate_rays(self):
         """Generating rays for all images."""
         # print(' Generating rays')
-        self.rays = utils.generate_rays(self.w, self.h, self.focal, self.camtoworlds)
+        self.rays = generate_rays(self.w, self.h, self.focal, self.camtoworlds)
 
 
 class Blender(Dataset):
@@ -177,7 +176,7 @@ class Blender(Dataset):
         """Load images from disk."""
         if args.render_path:
             raise ValueError("render_path cannot be used for the blender dataset.")
-        with utils.open_file(
+        with open(
             os.path.join(args.data_dir, "transforms_{}.json".format(self.split)), "r"
         ) as fp:
             meta = json.load(fp)
@@ -187,7 +186,7 @@ class Blender(Dataset):
         for i in range(len(meta["frames"])):
             frame = meta["frames"][i]
             fname = os.path.join(args.data_dir, frame["file_path"] + ".png")
-            with utils.open_file(fname, "rb") as imgin:
+            with open(fname, "rb") as imgin:
                 image = np.array(Image.open(imgin), dtype=np.float32) / 255.0
                 if args.factor == 2:
                     [halfres_h, halfres_w] = [hw // 2 for hw in image.shape[:2]]
@@ -230,22 +229,22 @@ class LLFF(Dataset):
         else:
             factor = 1
         imgdir = os.path.join(args.data_dir, "images" + imgdir_suffix)
-        if not utils.file_exists(imgdir):
+        if not os.path.exists(imgdir):
             raise ValueError("Image folder {} doesn't exist.".format(imgdir))
         imgfiles = [
             os.path.join(imgdir, f)
-            for f in sorted(utils.listdir(imgdir))
+            for f in sorted(os.listdir(imgdir))
             if f.endswith("JPG") or f.endswith("jpg") or f.endswith("png")
         ]
         images = []
         for imgfile in imgfiles:
-            with utils.open_file(imgfile, "rb") as imgin:
+            with open(imgfile, "rb") as imgin:
                 image = np.array(Image.open(imgin), dtype=np.float32) / 255.0
                 images.append(image)
         images = np.stack(images, axis=-1)
 
         # Load poses and bds.
-        with utils.open_file(os.path.join(args.data_dir, "poses_bounds.npy"), "rb") as fp:
+        with open(os.path.join(args.data_dir, "poses_bounds.npy"), "rb") as fp:
             poses_arr = np.load(fp)
         poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
         bds = poses_arr[:, -2:].transpose([1, 0])
@@ -470,6 +469,48 @@ class LLFF(Dataset):
         if self.split == "test":
             self.render_poses = new_poses[:, :3, :4]
         return poses_reset
+
+
+def generate_rays(w, h, focal, camtoworlds):
+    """
+    Generate perspective camera rays. Principal point is at center.
+    Args:
+        w: int image width
+        h: int image heigth
+        focal: float real focal length
+        camtoworlds: jnp.ndarray [B, 4, 4] c2w homogeneous poses
+        equirect: if true, generates spherical rays instead of pinhole
+    Returns:
+        rays: Rays a namedtuple(origins [B, 3], directions [B, 3], viewdirs [B, 3])
+    """
+    x, y = np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
+        np.arange(w, dtype=np.float32),  # X-Axis (columns)
+        np.arange(h, dtype=np.float32),  # Y-Axis (rows)
+        indexing="xy",
+    )
+
+    camera_dirs = np.stack(
+        [
+            (x - w * 0.5) / focal,
+            -(y - h * 0.5) / focal,
+            -np.ones_like(x),
+        ],
+        axis=-1,
+    )
+
+    #  camera_dirs = camera_dirs / np.linalg.norm(camera_dirs, axis=-1, keepdims=True)
+    c2w = camtoworlds[:, None, None, :3, :3]
+    camera_dirs = camera_dirs[None, Ellipsis, None]
+    directions = np.matmul(c2w, camera_dirs)[Ellipsis, 0]
+    origins = np.broadcast_to(
+        camtoworlds[:, None, None, :3, -1], directions.shape
+    )
+    norms = np.linalg.norm(directions, axis=-1, keepdims=True)
+    viewdirs = directions / norms
+    rays = utils.Rays(
+        origins=origins, directions=directions, viewdirs=viewdirs
+    )
+    return rays
 
 
 dataset_dict = {
