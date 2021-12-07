@@ -85,7 +85,7 @@ def train_step(model, state, batch, lr, device, args):
 
 def main(local_rank, args):
     def print0(*strs):
-        print(*strs) if local_rank is 0 else None
+        print(*strs) if local_rank == 0 else None
 
     print("local_rank:", local_rank, "world_size:", args.world_size)
     dist.init_process_group(
@@ -215,9 +215,6 @@ if __name__ == "__main__":
 
     utils.update_flags(args)
     utils.check_flags(args, require_batch_size_div=False)
-
-    os.makedirs(args.train_dir, exist_ok=True)
-    os.makedirs(args.render_dir, exist_ok=True)
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '12321'
