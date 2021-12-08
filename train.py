@@ -64,8 +64,8 @@ def train_step(model, state, batch, lr, device, args):
             loss_c = ((rgb_c - gt_rgb) ** 2).mean()
             psnr_c = utils.compute_psnr(loss_c)
         else:
-            loss_c = 0.0
-            psnr_c = 0.0
+            loss_c = torch.Tensor([0.]).to(device)
+            psnr_c = torch.Tensor([0.]).to(device)
 
         stats = utils.Stats(
             loss=loss, psnr=psnr, loss_c=loss_c, psnr_c=psnr_c
