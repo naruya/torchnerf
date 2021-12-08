@@ -101,38 +101,23 @@ class MLP(nn.Module):
           raw_sigma: torch.tensor(float32), with a shape of
                [batch, num_samples, num_sigma_channels].
         """
-        feature_dim = x.shape[-1]
-        num_samples = x.shape[1]
-        x = x.view([-1, feature_dim])
         inputs = x
         for i in range(self.net_depth):
             x = self.input_layers[i](x)
             x = self.net_activation(x)
             if i % self.skip_layer == 0 and i > 0:
                 x = torch.cat([x, inputs], dim=-1)
-        raw_sigma = self.sigma_layer(x).view(
-            [-1, num_samples, self.num_sigma_channels]
-        )
+        raw_sigma = self.sigma_layer(x)
 
         if condition is not None:
             # Output of the first part of MLP.
             bottleneck = self.bottleneck_layer(x)
-            # Broadcast condition from [batch, feature] to
-            # [batch, num_samples, feature] since all the samples along the same ray
-            # have the same viewdir.
-            if len(condition.shape) == 2:
-                condition = condition[:, None, :].repeat(1, num_samples, 1)
-            # Collapse the [batch, num_samples, feature] tensor to
-            # [batch * num_samples, feature] so that it can be fed into nn.Dense.
-            condition = condition.view([-1, condition.shape[-1]])
             x = torch.cat([bottleneck, condition], dim=-1)
             # Here use 1 extra layer to align with the original nerf model.
             for i in range(self.net_depth_condition):
                 x = self.condition_layers[i](x)
                 x = self.net_activation(x)
-        raw_rgb = self.rgb_layer(x).view(
-            [-1, num_samples, self.num_rgb_channels]
-        )
+        raw_rgb = self.rgb_layer(x)
         return raw_rgb, raw_sigma
 
 

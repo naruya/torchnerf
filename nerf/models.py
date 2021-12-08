@@ -32,7 +32,7 @@ def get_model(args):
     model_dict = {
         "nerf": NerfModel,
     }
-    return model_dict[args.model]()
+    return model_dict[args.model](args)
 
 
 def get_model_state(args, device="cpu", restore=True):
@@ -70,6 +70,7 @@ class NerfModel(nn.Module):
 
     def __init__(
         self,
+        args,
         num_coarse_samples: int = 64,  # The number of samples for the coarse nerf.
         num_fine_samples: int = 128,  # The number of samples for the fine nerf.
         use_viewdirs: bool = True,  # If True, use viewdirs as an input.
@@ -143,6 +144,9 @@ class NerfModel(nn.Module):
             randomized,
             self.lindisp,
         )
+        batch_size, num_samples = samples.shape[:-1]
+        samples = samples.reshape(-1, 3)
+
         samples_enc = model_utils.posenc(
             samples,
             self.min_deg_point,
@@ -152,15 +156,21 @@ class NerfModel(nn.Module):
 
         # Point attribute predictions
         if self.use_viewdirs:
-            viewdirs_enc = model_utils.posenc(
+            viewdirs_enc_ = model_utils.posenc(
                 rays.viewdirs,
                 0,
                 self.deg_view,
                 self.legacy_posenc_order,
             )
+            viewdirs_enc = viewdirs_enc_[:, None, :].repeat(1, num_samples, 1)
+            viewdirs_enc = viewdirs_enc.reshape(batch_size * num_samples, -1)
             raw_rgb, raw_sigma = self.MLP_0(samples_enc, viewdirs_enc)
         else:
             raw_rgb, raw_sigma = self.MLP_0(samples_enc)
+
+        raw_rgb = raw_rgb.reshape(batch_size, num_samples, 3)
+        raw_sigma = raw_sigma.reshape(batch_size, num_samples, 1)
+
         # Add noises to regularize the density predictions if needed
         raw_sigma = model_utils.add_gaussian_noise(
             raw_sigma,
@@ -194,6 +204,9 @@ class NerfModel(nn.Module):
                 self.num_fine_samples,
                 randomized,
             )
+            batch_size, num_samples = samples.shape[:-1]
+            samples = samples.reshape(-1, 3)
+
             samples_enc = model_utils.posenc(
                 samples,
                 self.min_deg_point,
@@ -202,9 +215,15 @@ class NerfModel(nn.Module):
             )
 
             if self.use_viewdirs:
+                viewdirs_enc = viewdirs_enc_[:, None, :].repeat(1, num_samples, 1)
+                viewdirs_enc = viewdirs_enc.reshape(batch_size * num_samples, -1)
                 raw_rgb, raw_sigma = self.MLP_1(samples_enc, viewdirs_enc)
             else:
                 raw_rgb, raw_sigma = self.MLP_1(samples_enc)
+
+            raw_rgb = raw_rgb.reshape(batch_size, num_samples, 3)
+            raw_sigma = raw_sigma.reshape(batch_size, num_samples, 1)
+
             raw_sigma = model_utils.add_gaussian_noise(
                 raw_sigma,
                 self.noise_std,
@@ -213,6 +232,7 @@ class NerfModel(nn.Module):
 
             rgb = self.rgb_activation(raw_rgb)
             sigma = self.sigma_activation(raw_sigma)
+
             comp_rgb, disp, acc, unused_weights = model_utils.volumetric_rendering(
                 rgb,
                 sigma,
