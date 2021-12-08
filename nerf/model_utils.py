@@ -17,8 +17,8 @@
 """Helper functions/classes for model definition."""
 import functools
 from typing import Any, Callable
+import gin
 import math
-
 import torch
 import torch.nn as nn
 
@@ -31,6 +31,7 @@ def dense_layer(in_features, out_features):
     return layer
 
 
+@gin.configurable
 class MLP(nn.Module):
     """A simple MLP."""
 

@@ -19,7 +19,7 @@ import os
 import glob
 import inspect
 from typing import Any, Callable
-
+import gin
 import torch
 import torch.nn as nn
 
@@ -30,9 +30,9 @@ from nerf import utils
 def get_model(args):
     """A helper function that wraps around a 'model zoo'."""
     model_dict = {
-        "nerf": construct_nerf,
+        "nerf": NerfModel,
     }
-    return model_dict[args.model](args)
+    return model_dict[args.model]()
 
 
 def get_model_state(args, device="cpu", restore=True):
@@ -41,9 +41,7 @@ def get_model_state(args, device="cpu", restore=True):
     optionally restoring checkpoint to reduce boilerplate
     """
     model = get_model(args).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), 
-                                 lr=args.lr_init, 
-                                 weight_decay=args.weight_decay_mult)
+    optimizer = torch.optim.Adam(model.parameters())
     state = utils.TrainState(optimizer=optimizer, step=0)
     if restore:
         model, state = restore_model_state(args, model, state)
@@ -65,9 +63,11 @@ def restore_model_state(args, model, state):
         print (f"* restore ckpt from {ckpt_path}.")
     return model, state
 
+
+@gin.configurable
 class NerfModel(nn.Module):
     """Nerf NN Model with both coarse and fine MLPs."""
-    
+
     def __init__(
         self,
         num_coarse_samples: int = 64,  # The number of samples for the coarse nerf.
@@ -90,7 +90,7 @@ class NerfModel(nn.Module):
         deg_view: int = 4,  # The degree of positional encoding for viewdirs.
         lindisp: bool = False,  # If True, sample linearly in disparity rather than in depth.
         rgb_activation: Callable[Ellipsis, Any] = nn.Sigmoid(),  # Output RGB activation.
-        sigma_activation: Callable[Ellipsis, Any] = nn.ReLU(),  # Output sigma activation.
+        sigma_activation: Callable[Ellipsis, Any] = nn.Softplus(),  # Output sigma activation.
         legacy_posenc_order: bool = False,  # Keep the same ordering as the original tf code.
     ):
         super(NerfModel, self).__init__()
@@ -116,33 +116,12 @@ class NerfModel(nn.Module):
         self.rgb_activation = rgb_activation
         self.sigma_activation = sigma_activation
         self.legacy_posenc_order = legacy_posenc_order
-        # TODO calculate input_dim/condition_dim from args
-        # Construct the "coarse" MLP. Weird name is for
-        # compatibility with 'compact' version
-        self.MLP_0 = model_utils.MLP(
-            net_depth = self.net_depth,
-            net_width = self.net_width,
-            net_depth_condition = self.net_depth_condition,
-            net_width_condition = self.net_width_condition,
-            net_activation = self.net_activation,
-            skip_layer = self.skip_layer,
-            num_rgb_channels = self.num_rgb_channels,
-            num_sigma_channels = self.num_sigma_channels,
-            input_dim=63,
-            condition_dim=27)
+
+        # Construct the "coarse" MLP.
+        self.MLP_0 = model_utils.MLP()
         # Construct the "fine" MLP.
         if self.num_fine_samples > 0:
-            self.MLP_1 = model_utils.MLP(
-                net_depth = self.net_depth,
-                net_width = self.net_width,
-                net_depth_condition = self.net_depth_condition,
-                net_width_condition = self.net_width_condition,
-                net_activation = self.net_activation,
-                skip_layer = self.skip_layer,
-                num_rgb_channels = self.num_rgb_channels,
-                num_sigma_channels = self.num_sigma_channels,
-                input_dim=63,
-                condition_dim=27)
+            self.MLP_1 = model_utils.MLP()
 
     def forward(self, rays, randomized):
         """Nerf Model.
@@ -243,50 +222,3 @@ class NerfModel(nn.Module):
             )
             ret.append((comp_rgb, disp, acc))
         return ret
-
-
-def construct_nerf(args):
-    """Construct a Neural Radiance Field.
-
-    Args:
-      args: FLAGS class. Hyperparameters of nerf.
-
-    Returns:
-      model: nn.Model. Nerf model with parameters.
-      state: flax.Module.state. Nerf model state for stateful parameters.
-    """
-    net_activation = getattr(nn, str(args.net_activation))
-    if inspect.isclass(net_activation):
-        net_activation = net_activation()
-    rgb_activation = getattr(nn, str(args.rgb_activation))
-    if inspect.isclass(rgb_activation):
-        rgb_activation = rgb_activation()
-    sigma_activation = getattr(nn, str(args.sigma_activation))
-    if inspect.isclass(sigma_activation):
-        sigma_activation = sigma_activation()
-
-    model = NerfModel(
-        min_deg_point=args.min_deg_point,
-        max_deg_point=args.max_deg_point,
-        deg_view=args.deg_view,
-        num_coarse_samples=args.num_coarse_samples,
-        num_fine_samples=args.num_fine_samples,
-        use_viewdirs=args.use_viewdirs,
-        near=args.near,
-        far=args.far,
-        noise_std=args.noise_std,
-        white_bkgd=args.white_bkgd,
-        net_depth=args.net_depth,
-        net_width=args.net_width,
-        net_depth_condition=args.net_depth_condition,
-        net_width_condition=args.net_width_condition,
-        skip_layer=args.skip_layer,
-        num_rgb_channels=args.num_rgb_channels,
-        num_sigma_channels=args.num_sigma_channels,
-        lindisp=args.lindisp,
-        net_activation=net_activation,
-        rgb_activation=rgb_activation,
-        sigma_activation=sigma_activation,
-        legacy_posenc_order=args.legacy_posenc_order,
-    )
-    return model

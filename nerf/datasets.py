@@ -17,9 +17,11 @@
 """Different datasets implementation plus a general port for all the datasets."""
 import json
 import os
+import gin
 import threading
+from typing import Any
+import dataclasses
 import queue
-
 import cv2  # pylint: disable=g-import-not-at-top
 import numpy as np
 from PIL import Image
@@ -28,7 +30,12 @@ from nerf import utils
 
 
 def get_dataset(split, args):
-    return dataset_dict[args.dataset](split, args)
+    if 'nerf' in args.data_dir.lower():
+        return Blender(split, args)
+    elif 'llff' in args.data_dir.lower():
+        return LLFF(split, args)
+    else:
+        raise ValueError("Unsupported.")
 
 
 def convert_to_ndc(origins, directions, focal, w, h, near=1.0):
@@ -54,26 +61,43 @@ def convert_to_ndc(origins, directions, focal, w, h, near=1.0):
     return origins, directions
 
 
+@gin.configurable
 class Dataset(threading.Thread):
     """Dataset Base Class."""
-
-    def __init__(self, split, args):
+    def __init__(
+        self,
+        split: str,
+        args: Any,
+        image_batching: bool = False,  # sample rays in a batch from different images.
+        factor: int = 0,  # the downsample factor of images, 0 for no downsample.
+        white_bkgd: bool = True,  # using white color as default background. (used in the blender dataset only)
+        render_path: bool = False,  # render generated path if set true. (used in the llff dataset only)
+        spherify: bool = False,  # set for spherical 360 scenes.
+        hold: int = 8,  # will take every 1/N images as LLFF test set. (used in the llff dataset only)
+    ):
         super(Dataset, self).__init__()
+        self.split = split
+        self.args = args
+        self.image_batching = image_batching
+        self.factor = factor
+        self.white_bkgd = white_bkgd
+        self.render_path = render_path
+        self.spherify = spherify
+        self.hold = hold
+
+        self.data_dir = args.data_dir
         self.queue = queue.Queue(3)  # Set prefetch buffer to 3 batches.
         self.daemon = True
-        self.split = split
         if split == "train":
-            self._train_init(args)
+            self._train_init()
         elif split == "test":
-            self._test_init(args)
+            self._test_init()
         else:
             raise ValueError(
                 'the split argument should be either "train" or "test", set'
-                "to {} here.".format(split)
+                "to {} here.".format(self.split)
             )
         self.batch_size = args.batch_size # // jax.host_count()
-        self.image_batching = args.image_batching
-        self.render_path = args.render_path
         self.start()
 
     def __iter__(self):
@@ -107,12 +131,12 @@ class Dataset(threading.Thread):
     def size(self):
         return self.n_examples
 
-    def _train_init(self, args):
+    def _train_init(self):
         """Initialize training."""
-        self._load_renderings(args)
+        self._load_renderings()
         self._generate_rays()
 
-        if args.image_batching:
+        if self.image_batching:
             # flatten the ray and image dimension together.
             self.images = self.images.reshape([-1, 3])
             self.rays = utils.namedtuple_map(
@@ -124,8 +148,8 @@ class Dataset(threading.Thread):
                 lambda r: r.reshape([-1, self.resolution, r.shape[-1]]), self.rays
             )
 
-    def _test_init(self, args):
-        self._load_renderings(args)
+    def _test_init(self):
+        self._load_renderings()
         self._generate_rays()
         self.it = 0
 
@@ -164,42 +188,77 @@ class Dataset(threading.Thread):
 
     # TODO(bydeng): Swap this function with a more flexible camera model.
     def _generate_rays(self):
-        """Generating rays for all images."""
-        # print(' Generating rays')
-        self.rays = generate_rays(self.w, self.h, self.focal, self.camtoworlds)
+        """
+        Generate perspective camera rays. Principal point is at center.
+        Args:
+            w: int image width
+            h: int image heigth
+            focal: float real focal length
+            camtoworlds: jnp.ndarray [B, 4, 4] c2w homogeneous poses
+            equirect: if true, generates spherical rays instead of pinhole
+        Returns:
+            rays: Rays a namedtuple(origins [B, 3], directions [B, 3], viewdirs [B, 3])
+        """
+        x, y = np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
+            np.arange(self.w, dtype=np.float32),  # X-Axis (columns)
+            np.arange(self.h, dtype=np.float32),  # Y-Axis (rows)
+            indexing="xy",
+        )
+
+        camera_dirs = np.stack(
+            [
+                (x - self.w * 0.5) / self.focal,
+                -(y - self.h * 0.5) / self.focal,
+                -np.ones_like(x),
+            ],
+            axis=-1,
+        )
+
+        #  camera_dirs = camera_dirs / np.linalg.norm(camera_dirs, axis=-1, keepdims=True)
+        c2w = self.camtoworlds[:, None, None, :3, :3]
+        camera_dirs = camera_dirs[None, Ellipsis, None]
+        directions = np.matmul(c2w, camera_dirs)[Ellipsis, 0]
+        origins = np.broadcast_to(
+            self.camtoworlds[:, None, None, :3, -1], directions.shape
+        )
+        norms = np.linalg.norm(directions, axis=-1, keepdims=True)
+        viewdirs = directions / norms
+        self.rays = utils.Rays(
+            origins=origins, directions=directions, viewdirs=viewdirs
+        )
 
 
 class Blender(Dataset):
     """Blender Dataset."""
 
-    def _load_renderings(self, args):
+    def _load_renderings(self):
         """Load images from disk."""
-        if args.render_path:
+        if self.render_path:
             raise ValueError("render_path cannot be used for the blender dataset.")
         with open(
-            os.path.join(args.data_dir, "transforms_{}.json".format(self.split)), "r"
+            os.path.join(self.data_dir, "transforms_{}.json".format(self.split)), "r"
         ) as fp:
             meta = json.load(fp)
         images = []
         cams = []
-        # print(' Load Blender', args.data_dir, 'split', self.split)
+        # print(' Load Blender', self.data_dir, 'split', self.split)
         for i in range(len(meta["frames"])):
             frame = meta["frames"][i]
-            fname = os.path.join(args.data_dir, frame["file_path"] + ".png")
+            fname = os.path.join(self.data_dir, frame["file_path"] + ".png")
             with open(fname, "rb") as imgin:
                 image = np.array(Image.open(imgin), dtype=np.float32) / 255.0
-                if args.factor == 2:
+                if self.factor == 2:
                     [halfres_h, halfres_w] = [hw // 2 for hw in image.shape[:2]]
                     image = cv2.resize(
                         image, (halfres_w, halfres_h), interpolation=cv2.INTER_AREA
                     )
-                elif args.factor > 0:
+                elif self.factor > 0:
                     raise ValueError(
                         "Blender dataset only supports factor=0 or 2, {} "
-                        "set.".format(args.factor)
+                        "set.".format(self.factor)
                     )
             cams.append(frame["transform_matrix"])
-            if args.white_bkgd:
+            if self.white_bkgd:
                 mask = image[..., -1:]
                 image = image[..., :3] * mask + (1.0 - mask)
             else:
@@ -217,18 +276,18 @@ class Blender(Dataset):
 class LLFF(Dataset):
     """LLFF Dataset."""
 
-    def _load_renderings(self, args):
+    def _load_renderings(self):
         """Load images from disk."""
-        args.data_dir = os.path.expanduser(args.data_dir)
-        print(' Load LLFF', args.data_dir, 'split', self.split)
+        self.data_dir = os.path.expanduser(self.data_dir)
+        print(' Load LLFF', self.data_dir, 'split', self.split)
         # Load images.
         imgdir_suffix = ""
-        if args.factor > 0:
-            imgdir_suffix = "_{}".format(args.factor)
-            factor = args.factor
+        if self.factor > 0:
+            imgdir_suffix = "_{}".format(self.factor)
+            factor = self.factor
         else:
             factor = 1
-        imgdir = os.path.join(args.data_dir, "images" + imgdir_suffix)
+        imgdir = os.path.join(self.data_dir, "images" + imgdir_suffix)
         if not os.path.exists(imgdir):
             raise ValueError("Image folder {} doesn't exist.".format(imgdir))
         imgfiles = [
@@ -244,7 +303,7 @@ class LLFF(Dataset):
         images = np.stack(images, axis=-1)
 
         # Load poses and bds.
-        with open(os.path.join(args.data_dir, "poses_bounds.npy"), "rb") as fp:
+        with open(os.path.join(self.data_dir, "poses_bounds.npy"), "rb") as fp:
             poses_arr = np.load(fp)
         poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
         bds = poses_arr[:, -2:].transpose([1, 0])
@@ -276,16 +335,13 @@ class LLFF(Dataset):
         poses = self._recenter_poses(poses)
 
         # Generate a spiral/spherical ray path for rendering videos.
-        if args.spherify:
+        if self.spherify:
             poses = self._generate_spherical_poses(poses, bds)
-            self.spherify = True
-        else:
-            self.spherify = False
-        if not args.spherify and self.split == "test":
+        if not self.spherify and self.split == "test":
             self._generate_spiral_poses(poses, bds)
 
         # Select the split.
-        i_test = np.arange(images.shape[0])[:: args.llffhold]
+        i_test = np.arange(images.shape[0])[:: self.hold]
         i_train = np.array(
             [i for i in np.arange(int(images.shape[0])) if i not in i_test]
         )
@@ -301,7 +357,7 @@ class LLFF(Dataset):
         self.focal = poses[0, -1, -1]
         self.h, self.w = images.shape[1:3]
         self.resolution = self.h * self.w
-        if args.render_path:
+        if self.render_path:
             self.n_examples = self.render_poses.shape[0]
         else:
             self.n_examples = images.shape[0]
@@ -469,51 +525,3 @@ class LLFF(Dataset):
         if self.split == "test":
             self.render_poses = new_poses[:, :3, :4]
         return poses_reset
-
-
-def generate_rays(w, h, focal, camtoworlds):
-    """
-    Generate perspective camera rays. Principal point is at center.
-    Args:
-        w: int image width
-        h: int image heigth
-        focal: float real focal length
-        camtoworlds: jnp.ndarray [B, 4, 4] c2w homogeneous poses
-        equirect: if true, generates spherical rays instead of pinhole
-    Returns:
-        rays: Rays a namedtuple(origins [B, 3], directions [B, 3], viewdirs [B, 3])
-    """
-    x, y = np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
-        np.arange(w, dtype=np.float32),  # X-Axis (columns)
-        np.arange(h, dtype=np.float32),  # Y-Axis (rows)
-        indexing="xy",
-    )
-
-    camera_dirs = np.stack(
-        [
-            (x - w * 0.5) / focal,
-            -(y - h * 0.5) / focal,
-            -np.ones_like(x),
-        ],
-        axis=-1,
-    )
-
-    #  camera_dirs = camera_dirs / np.linalg.norm(camera_dirs, axis=-1, keepdims=True)
-    c2w = camtoworlds[:, None, None, :3, :3]
-    camera_dirs = camera_dirs[None, Ellipsis, None]
-    directions = np.matmul(c2w, camera_dirs)[Ellipsis, 0]
-    origins = np.broadcast_to(
-        camtoworlds[:, None, None, :3, -1], directions.shape
-    )
-    norms = np.linalg.norm(directions, axis=-1, keepdims=True)
-    viewdirs = directions / norms
-    rays = utils.Rays(
-        origins=origins, directions=directions, viewdirs=viewdirs
-    )
-    return rays
-
-
-dataset_dict = {
-    "blender": Blender,
-    "llff": LLFF,
-}

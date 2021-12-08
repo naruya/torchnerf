@@ -17,40 +17,28 @@
 """Utility functions."""
 import collections
 import os
-import math
 import argparse
-
+import dataclasses
+import gin
 import torch
 import torch.nn.functional as F
-
 import numpy as np
 from PIL import Image
-import yaml
 from tqdm import tqdm
 
 
+@dataclasses.dataclass
 class TrainState:
-    def __init__(
-        self,
-        optimizer: torch.optim.Optimizer,
-        step: int = 0
-    ):
-        self.optimizer = optimizer
-        self.step = step
+    optimizer: torch.optim.Optimizer
+    step: int
 
 
+@dataclasses.dataclass
 class Stats:
-    def __init__(
-        self,
-        loss: float = 0,
-        psnr: float = 0,
-        loss_c: float = 0,
-        psnr_c: float = 0,
-    ):
-        self.loss = loss
-        self.psnr = psnr
-        self.loss_c = loss_c
-        self.psnr_c = psnr_c
+    loss: float = 0
+    psnr: float = 0
+    loss_c: float = 0
+    psnr_c: float = 0
 
 
 Rays = collections.namedtuple("Rays", ("origins", "directions", "viewdirs"))
@@ -61,168 +49,55 @@ def namedtuple_map(fn, tup):
     return type(tup)(*map(fn, tup))
 
 
-def define_flags():
+def define_args():
     """Define flags for both training and evaluation modes."""
     parser = argparse.ArgumentParser(description='TorchNeRF.')
     parser.add_argument(
-        "--train_dir", type=str, default=None,
-        help="where to store ckpts and logs")
+        "--train_dir", type=str, default=None, help="where to store ckpts and logs")
     parser.add_argument(
-        "--data_dir", type=str, default=None,
-        help="input data directory.")
+        "--data_dir", type=str, default=None, help="input data directory.")
     parser.add_argument(
-        "--config", type=str, default=None,
-        help="using config files to set hyperparameters.")
-
-    # Dataset Flags
-    parser.add_argument(
-        "--dataset", type=str, default="blender", choices=["blender", "llff"],
-        help="The type of dataset feed to nerf.")
-    parser.add_argument(
-        "--image_batching", type=bool, default=False,
-        help="sample rays in a batch from different images.")
-    parser.add_argument(
-        "--white_bkgd", type=bool, default=True,
-        help="using white color as default background. (used in the blender dataset only)")
-    parser.add_argument(
-        "--batch_size", type=int, default=1024,
-        help="the number of rays in a mini-batch (for training).")
-    parser.add_argument(
-        "--factor", type=int, default=4,
-        help="the downsample factor of images, 0 for no downsample.")
-    parser.add_argument(
-        "--spherify", type=bool, default=False,
-        help="set for spherical 360 scenes.")
-    parser.add_argument(
-        "--render_path", type=bool, default=False,
-        help="render generated path if set true. (used in the llff dataset only)")
-    parser.add_argument(
-        "--llffhold", type=int, default=8,
-        help="will take every 1/N images as LLFF test set. (used in the llff dataset only)")
-
-    # Model Flags
+        "--gin_file", type=str, default=None, help="path to the config file.")
     parser.add_argument(
         "--model", type=str, default="nerf", help="name of model to use.")
     parser.add_argument(
-        "--near", type=float, default=2.0, help="near clip of volumetric rendering.")
-    parser.add_argument(
-        "--far", type=float, default=6.0, help="far clip of volumentric rendering.")
-    parser.add_argument(
-        "--net_depth", type=int, default=8, help="depth of the first part of MLP.")
-    parser.add_argument(
-        "--net_width", type=int, default=256, help="width of the first part of MLP.")
-    parser.add_argument(
-        "--net_depth_condition", type=int, default=1, help="depth of the second part of MLP.")
-    parser.add_argument(
-        "--net_width_condition", type=int, default=128, help="width of the second part of MLP.")
-    parser.add_argument(
-        "--weight_decay_mult", type=float, default=0., help="The multiplier on weight decay")
-    parser.add_argument(
-        "--skip_layer", type=int, default=4,
-        help="add a skip connection to the output vector of every skip_layer layers.")
-    parser.add_argument(
-        "--num_rgb_channels", type=int, default=3, help="the number of RGB channels.")
-    parser.add_argument(
-        "--num_sigma_channels", type=int, default=1, help="the number of density channels.")
-    parser.add_argument(
-        "--randomized", type=int, default=True, help="use randomized stratified sampling.")
-    parser.add_argument(
-        "--min_deg_point", type=int, default=0,
-        help="Minimum degree of positional encoding for points.")
-    parser.add_argument(
-        "--max_deg_point", type=int, default=10,
-        help="Maximum degree of positional encoding for points.")
-    parser.add_argument(
-        "--deg_view", type=int, default=4, help="Degree of positional encoding for viewdirs.")
-    parser.add_argument(
-        "--num_coarse_samples", type=int, default=64,
-        help="the number of samples on each ray for the coarse model.")
-    parser.add_argument(
-        "--num_fine_samples", type=int, default=128,
-        help="the number of samples on each ray for the fine model.")
-    parser.add_argument(
-        "--use_viewdirs", type=bool, default=True, help="use view directions as a condition.")
-    parser.add_argument(
-        "--noise_std", type=float, default=None,
-        help="std dev of noise added to regularize sigma output. (used in the llff dataset only)")
-    parser.add_argument(
-        "--lindisp", type=bool, default=False,
-        help="sampling linearly in disparity rather than depth.")
-    parser.add_argument(
-        "--net_activation", type=str, default="ReLU",
-        help="activation function used within the MLP.")
-    parser.add_argument(
-        "--rgb_activation", type=str, default="Sigmoid",
-        help="activation function used to produce RGB.")
-    parser.add_argument(
-        "--sigma_activation", type=str, default="Softplus",
-        help="activation function used to produce density.")
-    parser.add_argument(
-        "--legacy_posenc_order", type=bool, default=False,
-        help="If True, revert the positional encoding feature order to an older version of this codebase.")
-
-    # Train Flags
-    parser.add_argument(
-        "--lr_init", type=float, default=5e-4, help="The initial learning rate.")
-    parser.add_argument(
-        "--lr_final", type=float, default=5e-6, help="The final learning rate.")
-    parser.add_argument(
-        "--lr_max_steps", type=int, default=1000000, help="(for a fair comparison)")
-    parser.add_argument(
-        "--lr_delay_steps", type=int, default=0,
-        help="The number of steps at the beginning of training to reduce the learning rate by lr_delay_mult")
-    parser.add_argument(
-        "--lr_delay_mult", type=float, default=1.0,
-        help="A multiplier on the learning rate when the step is < lr_delay_steps")
+        "--batch_size", type=int, default=1024, help="the number of rays in a mini-batch.")
     parser.add_argument(
         "--max_steps", type=int, default=1000000, help="the number of optimization steps.")
     parser.add_argument(
-        "--save_every", type=int, default=5000, help="the number of steps to save a checkpoint.")
-    parser.add_argument(
         "--print_every", type=int, default=500, help="the number of steps between reports to tensorboard.")
     parser.add_argument(
-        "--render_every", type=int, default=10000,
-        help="the number of steps to render a test image better to be x00 for accurate step time record.")
-
-    # Eval Flags
+        "--save_every", type=int, default=10000, help="the number of steps to save a checkpoint.")
+    parser.add_argument(
+        "--render_every", type=int, default=10000, help="the number of steps to render a test image.")
+    # eval
     parser.add_argument(
         "--eval_once", type=bool, default=True,
-        help="evaluate the model only once if true, otherwise keeping evaluating new checkpoints if there's any.")
+        help="evaluate the model only once if true, otherwise keeping evaluating new checkpoints.")
     parser.add_argument(
         "--save_output", type=bool, default=True, help="save predicted images to disk if True.")
     parser.add_argument(
-        "--chunk", type=int, default=8192,
-        help="the size of chunks for evaluation inferences, set to the value that"
-        "fits your GPU/TPU memory.")
+        "--chunk", type=int, default=8192, help="the size of chunks for evaluation inferences.")
     return parser.parse_args()
-
-
-def update_flags(args):
-    """Update the flags in `args` with the contents of the config YAML file."""
-    if args.config is None:
-        return
-    pth = os.path.join(args.config + ".yaml")
-    with open(pth, "r") as fin:
-        configs = yaml.load(fin, Loader=yaml.FullLoader)
-    # Only allow args to be updated if they already exist.
-    invalid_args = list(set(configs.keys()) - set(dir(args)))
-    if invalid_args:
-        raise ValueError(f"Invalid args {invalid_args} in {pth}.")
-    args.__dict__.update(configs)
-
-
-def check_flags(args, require_data=True, require_batch_size_div=False):
-    if args.train_dir is None:
-        raise ValueError("train_dir must be set. None set now.")
-    if require_data and args.data_dir is None:
-        raise ValueError("data_dir must be set. None set now.")
-    if require_batch_size_div and args.batch_size % torch.cuda.device_count() != 0:
-        raise ValueError("Batch size must be divisible by the number of devices.")
 
 
 def set_random_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+
+def save_img(img, pth):
+    """Save an image to disk.
+
+    Args:
+      img: jnp.ndarry, [height, width, channels], img will be clipped to [0, 1]
+        before saved to pth.
+      pth: string, path to save the image to.
+    """
+    with open(pth, "wb") as imgout:
+        Image.fromarray(
+            np.array((np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8))
+        ).save(imgout, "PNG")
 
 
 def render_image(render_fn, rays, normalize_disp, chunk=8192):
@@ -357,22 +232,14 @@ def compute_ssim(
     return ssim_map if return_map else ssim
 
 
-def save_img(img, pth):
-    """Save an image to disk.
-
-    Args:
-      img: jnp.ndarry, [height, width, channels], img will be clipped to [0, 1]
-        before saved to pth.
-      pth: string, path to save the image to.
-    """
-    with open(pth, "wb") as imgout:
-        Image.fromarray(
-            np.array((np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8))
-        ).save(imgout, "PNG")
-
-
+@gin.configurable
 def learning_rate_decay(
-    step, lr_init, lr_final, lr_max_steps, lr_delay_steps=0, lr_delay_mult=1
+    step,
+    lr_init=5e-4,
+    lr_final=5e-6,
+    lr_max_steps=1000000,
+    lr_delay_steps=0,
+    lr_delay_mult=1,
 ):
     """Continuous learning rate decay function.
 

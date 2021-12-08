@@ -17,6 +17,7 @@
 """Training script for Nerf."""
 import os
 import functools
+import gin
 import time
 import numpy as np
 import torch
@@ -44,7 +45,7 @@ def train_step(model, state, batch, lr, device, args):
     def loss_fn():
         rays = utils.namedtuple_map(
             lambda z: torch.from_numpy(z).to(device), batch["rays"])
-        ret = model(rays, args.randomized)
+        ret = model(rays, randomized=True)
         if len(ret) not in (1, 2):
             raise ValueError(
                 "ret should contain either 1 set of output (coarse only), or 2 sets"
@@ -84,6 +85,9 @@ def train_step(model, state, batch, lr, device, args):
 
 
 def main(local_rank, args):
+    gin.parse_config_file(args.gin_file)
+    # gin.parse_config_files_and_bindings([args.gin_file], None)
+
     def print0(*strs):
         print(*strs) if local_rank == 0 else None
 
@@ -107,15 +111,6 @@ def main(local_rank, args):
     model = DDP(model, device_ids=[local_rank])
     print0('* Done loading model')
 
-    learning_rate_fn = functools.partial(
-        utils.learning_rate_decay,
-        lr_init=args.lr_init,
-        lr_final=args.lr_final,
-        lr_max_steps=args.lr_max_steps,
-        lr_delay_steps=args.lr_delay_steps,
-        lr_delay_mult=args.lr_delay_mult,
-    )
-
     # Resume training step of the last checkpoint.
     init_step = state.step + 1
     if local_rank == 0:
@@ -128,7 +123,7 @@ def main(local_rank, args):
         if reset_timer:
             t_loop_start = time.time()
             reset_timer = False
-        lr = learning_rate_fn(step)
+        lr = utils.learning_rate_decay(step)
         state, stats = train_step(model, state, batch, lr, device, args)
         if local_rank == 0:
             stats_trace.append(stats)
@@ -179,7 +174,7 @@ def main(local_rank, args):
 
             with torch.no_grad():
                 pred_color, pred_disp, pred_acc = utils.render_image(
-                    functools.partial(model, randomized=args.randomized),
+                    functools.partial(model, randomized=True),
                     rays,
                     args.dataset == "llff",
                     chunk=args.chunk,
@@ -209,12 +204,9 @@ def main(local_rank, args):
 
 
 if __name__ == "__main__":
-    args = utils.define_flags()
+    args = utils.define_args()
     args.render_dir = os.path.join(args.train_dir, 'render')
     args.world_size = torch.cuda.device_count()
-
-    utils.update_flags(args)
-    utils.check_flags(args, require_batch_size_div=False)
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '12321'
