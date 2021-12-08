@@ -20,6 +20,7 @@ import glob
 import inspect
 from typing import Any, Callable
 import gin
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -91,7 +92,7 @@ class NerfModel(nn.Module):
         deg_view: int = 4,  # The degree of positional encoding for viewdirs.
         lindisp: bool = False,  # If True, sample linearly in disparity rather than in depth.
         rgb_activation: Callable[Ellipsis, Any] = nn.Sigmoid(),  # Output RGB activation.
-        sigma_activation: Callable[Ellipsis, Any] = nn.Softplus(),  # Output sigma activation.
+        sigma_activation: Callable[Ellipsis, Any] = nn.ReLU(),  # Output sigma activation.
         legacy_posenc_order: bool = False,  # Keep the same ordering as the original tf code.
     ):
         super(NerfModel, self).__init__()
@@ -124,6 +125,9 @@ class NerfModel(nn.Module):
         if self.num_fine_samples > 0:
             self.MLP_1 = model_utils.MLP()
 
+        if args.voxel_dir:
+            self.voxel = np.load(os.path.join(args.voxel_dir, "voxel.npy"))
+
     def forward(self, rays, randomized):
         """Nerf Model.
 
@@ -145,7 +149,15 @@ class NerfModel(nn.Module):
             self.lindisp,
         )
         batch_size, num_samples = samples.shape[:-1]
+        device = samples.device
         samples = samples.reshape(-1, 3)
+
+        if hasattr(self, 'voxel'):
+            pts = utils.digitize(samples.detach().cpu(), self.near, self.far, self.voxel.shape[0])
+            mask = self.voxel[pts[..., 0], pts[..., 1], pts[..., 2]].squeeze()
+            ind_inp, ind_bak = np.split(np.argsort(mask)[::-1], [int(np.sum(mask>0.))])
+        else:
+            ind_inp, ind_bak = np.array([None]), np.array([None])
 
         samples_enc = model_utils.posenc(
             samples,
@@ -164,9 +176,14 @@ class NerfModel(nn.Module):
             )
             viewdirs_enc = viewdirs_enc_[:, None, :].repeat(1, num_samples, 1)
             viewdirs_enc = viewdirs_enc.reshape(batch_size * num_samples, -1)
-            raw_rgb, raw_sigma = self.MLP_0(samples_enc, viewdirs_enc)
+            raw_rgb, raw_sigma = self.MLP_0(samples_enc[ind_inp.copy()], viewdirs_enc[ind_inp.copy()])
         else:
-            raw_rgb, raw_sigma = self.MLP_0(samples_enc)
+            raw_rgb, raw_sigma = self.MLP_0(samples_enc[ind_inp.copy()])
+
+        if hasattr(self, 'voxel'):
+            ind = np.argsort(np.concatenate([ind_inp, ind_bak]))
+            raw_rgb = torch.vstack([raw_rgb, torch.zeros([len(ind_bak), 3]).to(device)])[ind]
+            raw_sigma = torch.vstack([raw_sigma, torch.zeros([len(ind_bak), 1]).to(device)])[ind]
 
         raw_rgb = raw_rgb.reshape(batch_size, num_samples, 3)
         raw_sigma = raw_sigma.reshape(batch_size, num_samples, 1)
@@ -207,6 +224,13 @@ class NerfModel(nn.Module):
             batch_size, num_samples = samples.shape[:-1]
             samples = samples.reshape(-1, 3)
 
+            if hasattr(self, 'voxel'):
+                pts = utils.digitize(samples.detach().cpu(), self.near, self.far, self.voxel.shape[0])
+                mask = self.voxel[pts[..., 0], pts[..., 1], pts[..., 2]].squeeze()
+                ind_inp, ind_bak = np.split(np.argsort(mask)[::-1], [int(np.sum(mask>0.))])
+            else:
+                ind_inp, ind_bak = np.array([None]), np.array([None])
+
             samples_enc = model_utils.posenc(
                 samples,
                 self.min_deg_point,
@@ -217,9 +241,14 @@ class NerfModel(nn.Module):
             if self.use_viewdirs:
                 viewdirs_enc = viewdirs_enc_[:, None, :].repeat(1, num_samples, 1)
                 viewdirs_enc = viewdirs_enc.reshape(batch_size * num_samples, -1)
-                raw_rgb, raw_sigma = self.MLP_1(samples_enc, viewdirs_enc)
+                raw_rgb, raw_sigma = self.MLP_1(samples_enc[ind_inp.copy()], viewdirs_enc[ind_inp.copy()])
             else:
-                raw_rgb, raw_sigma = self.MLP_1(samples_enc)
+                raw_rgb, raw_sigma = self.MLP_1(samples_enc[ind_inp.copy()])
+
+            if hasattr(self, 'voxel'):
+                ind = np.argsort(np.concatenate([ind_inp, ind_bak]))
+                raw_rgb = torch.vstack([raw_rgb, torch.zeros([len(ind_bak), 3]).to(device)])[ind]
+                raw_sigma = torch.vstack([raw_sigma, torch.zeros([len(ind_bak), 1]).to(device)])[ind]
 
             raw_rgb = raw_rgb.reshape(batch_size, num_samples, 3)
             raw_sigma = raw_sigma.reshape(batch_size, num_samples, 1)

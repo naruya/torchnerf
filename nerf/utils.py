@@ -70,6 +70,9 @@ def define_args():
         "--save_every", type=int, default=10000, help="the number of steps to save a checkpoint.")
     parser.add_argument(
         "--render_every", type=int, default=10000, help="the number of steps to render a test image.")
+    # Vax
+    parser.add_argument(
+        "--voxel_dir", type=str, default=None, help="voxel data directory.")
     # eval
     parser.add_argument(
         "--chunk", type=int, default=4000, help="the size of chunks for evaluation inferences.")
@@ -271,3 +274,8 @@ def learning_rate_decay(
     t = np.clip(step / lr_max_steps, 0, 1)
     log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
     return delay_rate * log_lerp
+
+
+# VaxNeRF
+def digitize(p, near, far, size):
+    return np.digitize(p + (near + far) / 2., np.linspace(near, far, size-1))
