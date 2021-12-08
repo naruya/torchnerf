@@ -57,7 +57,7 @@ def define_args():
     parser.add_argument(
         "--data_dir", type=str, default=None, help="input data directory.")
     parser.add_argument(
-        "--gin_file", type=str, default=None, help="path to the config file.")
+        "--gin_files", nargs='*', default=None, help="path to the config files.")
     parser.add_argument(
         "--model", type=str, default="nerf", help="name of model to use.")
     parser.add_argument(

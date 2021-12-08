@@ -85,8 +85,7 @@ def train_step(model, state, batch, lr, device, args):
 
 
 def main(local_rank, args):
-    gin.parse_config_file(args.gin_file)
-    # gin.parse_config_files_and_bindings([args.gin_file], None)
+    gin.parse_config_files_and_bindings(args.gin_files, None)
 
     def print0(*strs):
         print(*strs) if local_rank == 0 else None
