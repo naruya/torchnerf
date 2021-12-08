@@ -91,7 +91,7 @@ class NerfModel(nn.Module):
         deg_view: int = 4,  # The degree of positional encoding for viewdirs.
         lindisp: bool = False,  # If True, sample linearly in disparity rather than in depth.
         rgb_activation: Callable[Ellipsis, Any] = nn.Sigmoid(),  # Output RGB activation.
-        sigma_activation: Callable[Ellipsis, Any] = nn.Softplus(),  # Output sigma activation.
+        sigma_activation: Callable[Ellipsis, Any] = nn.ReLU(),  # Output sigma activation.
         legacy_posenc_order: bool = False,  # Keep the same ordering as the original tf code.
     ):
         super(NerfModel, self).__init__()
