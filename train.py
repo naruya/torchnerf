@@ -176,7 +176,7 @@ def main(local_rank, args):
                 pred_color, pred_disp, pred_acc = utils.render_image(
                     functools.partial(model, randomized=True),
                     rays,
-                    args.dataset == "llff",
+                    'llff' in args.data_dir.lower(),
                     chunk=args.chunk,
                 )
                 psnr = utils.compute_psnr(pred_color, gt_color).mean()
