@@ -158,7 +158,7 @@ def main(local_rank, args):
             print('* Saving')
             torch.save({
                 'step': state.step,
-                'model': model.state_dict(),
+                'model': model.module.state_dict(),
                 'optimizer': state.optimizer.state_dict(),
             }, os.path.join(args.train_dir, f"step-{step:09d}.ckpt"))
 
@@ -198,14 +198,13 @@ def main(local_rank, args):
         print('* Saving')
         torch.save({
             'step': state.step,
-            'model': model.state_dict(),
+            'model': model.module.state_dict(),
             'optimizer': state.optimizer.state_dict(),
         }, os.path.join(args.train_dir, f"step-{step:09d}.ckpt"))
 
 
 if __name__ == "__main__":
     args = utils.define_args()
-    args.render_dir = os.path.join(args.train_dir, 'render')
     args.world_size = torch.cuda.device_count()
 
     os.environ['MASTER_ADDR'] = '127.0.0.1'

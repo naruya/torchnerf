@@ -61,7 +61,7 @@ def define_args():
     parser.add_argument(
         "--model", type=str, default="nerf", help="name of model to use.")
     parser.add_argument(
-        "--batch_size", type=int, default=1024, help="the number of rays in a mini-batch.")
+        "--batch_size", type=int, default=4096, help="the number of rays in a mini-batch.")
     parser.add_argument(
         "--max_steps", type=int, default=1000000, help="the number of optimization steps.")
     parser.add_argument(
@@ -72,12 +72,12 @@ def define_args():
         "--render_every", type=int, default=10000, help="the number of steps to render a test image.")
     # eval
     parser.add_argument(
-        "--eval_once", type=bool, default=True,
+        "--chunk", type=int, default=4000, help="the size of chunks for evaluation inferences.")
+    parser.add_argument(
+        '--eval_once', action='store_true',
         help="evaluate the model only once if true, otherwise keeping evaluating new checkpoints.")
     parser.add_argument(
-        "--save_output", type=bool, default=True, help="save predicted images to disk if True.")
-    parser.add_argument(
-        "--chunk", type=int, default=8192, help="the size of chunks for evaluation inferences.")
+        "--showcase_index", type=int, default=0, help="index of test view point to render.")
     return parser.parse_args()
 
 
@@ -149,7 +149,7 @@ def compute_psnr(*args):
         mse = args[0]
     else:
         img0, img1 = args[0], args[1]
-        mse = (img0 - img1) ** 2
+        mse = ((img0 - img1) ** 2).mean()
     return -10.0 * torch.log(mse) / np.log(10.0)
 
 
