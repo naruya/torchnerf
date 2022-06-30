@@ -30,8 +30,10 @@ from nerf import utils
 
 
 def get_dataset(split, args):
-    if 'nerf' in args.data_dir.lower():
+    if 'blender' in args.data_dir.lower():
         return Blender(split, args)
+    elif 'unity' in args.data_dir.lower():
+        return Unity(split, args)
     elif 'llff' in args.data_dir.lower():
         return LLFF(split, args)
     else:
@@ -271,6 +273,77 @@ class Blender(Dataset):
         camera_angle_x = float(meta["camera_angle_x"])
         self.focal = 0.5 * self.w / np.tan(0.5 * camera_angle_x)
         self.n_examples = self.images.shape[0]
+
+
+import re
+import quaternion
+from scipy.spatial.transform import Rotation
+
+
+def tf2c2w(pos, quat):
+    c2w = np.zeros([4,4])
+    c2w[:3,:3] = quaternion.as_rotation_matrix(np.quaternion(*quat))
+    c2w[:,3] = np.concatenate([pos, np.array([1.,])])
+    # c2w[:3,:3] = c2w[:3,:3].dot(Rotation.from_euler('xyz', (0,0,90), degrees=True).as_matrix())
+    c2w[:3,:3] = c2w[:3,:3].dot(Rotation.from_euler('xyz', (90,0,-90), degrees=True).as_matrix())
+    return c2w
+
+
+class Unity(Dataset):
+    """Unity Dataset. unity quat -> blender c2w"""
+
+    def _load_renderings(self):
+        """Load images from disk."""
+        if self.render_path:
+            raise ValueError("render_path cannot be used for the blender dataset.")
+        with open(
+            os.path.join(self.data_dir, "transforms_{}.txt".format(self.split)), "r"
+        ) as fp:
+            self.focal = float(fp.readline())
+            data = fp.readlines()
+
+        data = [re.findall('\(.*?\)', datai) for datai in data]
+        pos = [re.split('[(,)]', datai[0][1:-1]) for datai in data]
+        quat = [re.split('[(,)]', datai[1][1:-1]) for datai in data]
+        pos = np.array(pos, np.float32)
+        quat = np.array(quat, np.float32)
+        pos = pos[:,[2,0,1]] * np.array([[1,-1,1]])
+        quat = quat[:,[3,2,0,1]] * np.array([[-1,1,-1,1]])
+        camtoworlds = [tf2c2w(*tf) for tf in zip(pos, quat)]
+        self.camtoworlds = np.array(camtoworlds).astype(np.float32)
+
+        images = []
+        # cams = []
+        print(' Load Unity', self.data_dir, 'split', self.split)
+        for i in range(len(camtoworlds)):
+            fname = os.path.join(self.data_dir, self.split, "{:03}.png".format(i))
+            with open(fname, "rb") as imgin:
+                image = np.array(Image.open(imgin), dtype=np.float32) / 255.0
+                if self.factor == 2:
+                    [halfres_h, halfres_w] = [hw // 2 for hw in image.shape[:2]]
+                    image = cv2.resize(
+                        image, (halfres_w, halfres_h), interpolation=cv2.INTER_AREA
+                    )
+                elif self.factor > 0:
+                    raise ValueError(
+                        "Unity dataset only supports factor=0 or 2, {} "
+                        "set.".format(self.factor)
+                    )
+            # cams.append(frame["transform_matrix"])
+            if self.white_bkgd:
+                mask = image[..., -1:]
+                image = image[..., :3] * mask + (1.0 - mask)
+            else:
+                image = image[..., :3]
+            images.append(image)
+        self.images = np.stack(images, axis=0)
+        self.h, self.w = self.images.shape[1:3]
+        self.resolution = self.h * self.w
+        # self.camtoworlds = np.stack(cams, axis=0).astype(np.float32)
+        # camera_angle_x = float(meta["camera_angle_x"])
+        # self.focal = 0.5 * self.w / np.tan(0.5 * camera_angle_x)
+        self.n_examples = self.images.shape[0]
+
 
 
 class LLFF(Dataset):
