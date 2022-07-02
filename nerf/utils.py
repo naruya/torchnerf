@@ -49,7 +49,7 @@ def namedtuple_map(fn, tup):
     return type(tup)(*map(fn, tup))
 
 
-def define_args():
+def define_args(args=None):
     """Define flags for both training and evaluation modes."""
     parser = argparse.ArgumentParser(description='TorchNeRF.')
     parser.add_argument(
@@ -78,7 +78,7 @@ def define_args():
         help="evaluate the model only once if true, otherwise keeping evaluating new checkpoints.")
     parser.add_argument(
         "--showcase_index", type=int, default=0, help="index of test view point to render.")
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
 def set_random_seed(seed):
@@ -100,7 +100,7 @@ def save_img(img, pth):
         ).save(imgout, "PNG")
 
 
-def render_image(render_fn, rays, normalize_disp, chunk=8192):
+def render_image(render_fn, rays, normalize_disp, chunk=8192, disable=False):
     """Render all the pixels of an image (in test mode).
 
     Args:
@@ -119,7 +119,7 @@ def render_image(render_fn, rays, normalize_disp, chunk=8192):
     rays = namedtuple_map(lambda r: r.reshape((num_rays, -1)), rays)
 
     results = []
-    for i in tqdm(range(0, num_rays, chunk)):
+    for i in tqdm(range(0, num_rays, chunk), disable=disable):
         # pylint: disable=cell-var-from-loop
         chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
         chunk_results = render_fn(chunk_rays)[-1]
