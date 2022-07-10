@@ -83,7 +83,7 @@ class MLP(nn.Module):
                 in_features = self.net_width_condition
         self.rgb_layer = dense_layer(in_features, self.num_rgb_channels)
 
-    def forward(self, x, condition=None):
+    def forward(self, x, condition=None, no_rgb=False):
         """Evaluate the MLP.
 
         Args:
@@ -108,6 +108,9 @@ class MLP(nn.Module):
             if i % self.skip_layer == 0 and i > 0:
                 x = torch.cat([x, inputs], dim=-1)
         raw_sigma = self.sigma_layer(x)
+
+        if no_rgb:
+            return raw_sigma
 
         if condition is not None:
             # Output of the first part of MLP.
