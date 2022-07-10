@@ -201,9 +201,10 @@ class Dataset(threading.Thread):
         Returns:
             rays: Rays a namedtuple(origins [B, 3], directions [B, 3], viewdirs [B, 3])
         """
+        # https://github.com/google-research/google-research/blob/master/jaxnerf/nerf/utils.py#L88
         x, y = np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
-            np.arange(self.w, dtype=np.float32),  # X-Axis (columns)
-            np.arange(self.h, dtype=np.float32),  # Y-Axis (rows)
+            np.arange(self.w, dtype=np.float32) + 0.5,  # X-Axis (columns)
+            np.arange(self.h, dtype=np.float32) + 0.5,  # Y-Axis (rows)
             indexing="xy",
         )
 
